@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from "uuid";
 import { PrismaClient, MediaType } from "../../generated/prisma";
 import { requireAuth, AuthRequest } from "../middleware/auth";
 import { signJwt } from "../utils/jwt";
+import rateLimit from "express-rate-limit";
+import { cacheGet, cacheSet } from "../utils/cache";
 
 const prisma = new PrismaClient();
 const router = Router();
@@ -18,6 +20,14 @@ const storage = multer.diskStorage({
   },
 });
 const upload = multer({ storage });
+
+// Rate limit for abuse prevention on view logging
+const viewLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 router.post("/", requireAuth, upload.single("file"), async (req: AuthRequest, res) => {
   const { title, type } = req.body as { title: string; type: "video" | "audio" };
@@ -63,7 +73,7 @@ router.get("/stream", async (req, res) => {
 });
 
 // Log a view explicitly via API
-router.post("/:id/view", requireAuth, async (req: AuthRequest, res) => {
+router.post("/:id/view", requireAuth, viewLimiter, async (req: AuthRequest, res) => {
   const id = req.params.id as string;
   if (!id) return res.status(400).json({ error: "invalid id" });
   const asset = await prisma.mediaAsset.findUnique({ where: { id } });
@@ -80,10 +90,11 @@ router.get("/:id/analytics", requireAuth, async (req, res) => {
   const asset = await prisma.mediaAsset.findUnique({ where: { id } });
   if (!asset) return res.status(404).json({ error: "not found" });
 
-  const logs = await prisma.mediaViewLog.findMany({
-    where: { mediaId: id },
-    orderBy: { timestamp: "asc" },
-  });
+  const cacheKey = `analytics:${id}`;
+  const cached = await cacheGet(cacheKey);
+  if (cached) return res.json(cached);
+
+  const logs = await prisma.mediaViewLog.findMany({ where: { mediaId: id }, orderBy: { timestamp: "asc" } });
 
   const totalViews = logs.length;
   const uniqueIps = new Set(logs.map(l => l.viewedByIp)).size;
@@ -93,7 +104,9 @@ router.get("/:id/analytics", requireAuth, async (req, res) => {
     const key = d.toISOString().slice(0,10);
     viewsPerDay[key] = (viewsPerDay[key] || 0) + 1;
   }
-  res.json({ total_views: totalViews, unique_ips: uniqueIps, views_per_day: viewsPerDay });
+  const payload = { total_views: totalViews, unique_ips: uniqueIps, views_per_day: viewsPerDay };
+  await cacheSet(cacheKey, payload, 60);
+  res.json(payload);
 });
 
 export default router;

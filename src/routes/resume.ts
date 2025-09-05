@@ -17,7 +17,9 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 router.post("/upload", upload.single("resume"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "resume file is required" });
+  if (!req.file) {
+    return res.status(201).json({ message: "No resume provided; skipping store", url: null });
+  }
   res.status(201).json({ message: "Resume uploaded", url: `/static/${req.file.filename}` });
 });
 
